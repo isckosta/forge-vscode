@@ -407,6 +407,82 @@ suite('ForgeExplorerProvider', () => {
     }
   });
 
+  test('rejects a pending Changes expansion after disable and re-enable', async () => {
+    const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+    const folder = workspaceFolder('pending');
+    let snapshot: ForgeWorkspaceSnapshot = {
+      kind: 'workspace',
+      folders: [{ folder, state: { kind: 'forge-enabled' } }],
+    };
+    let callCount = 0;
+    const resolveDiscoveries: Array<(result: ForgeChangeDiscoveryResult) => void> = [];
+    const discovered: StubChangeDiscovery = {
+      discover: async () => {
+        callCount += 1;
+        return new Promise<ForgeChangeDiscoveryResult>((resolve) => {
+          resolveDiscoveries.push(resolve);
+        });
+      },
+    };
+    const provider = new ForgeExplorerProvider(
+      { getSnapshot: () => snapshot, onDidChangeSnapshot: snapshotEmitter.event },
+      discovered
+    );
+
+    try {
+      const changes = new ForgeExplorerItem(
+        'Changes',
+        'changes',
+        undefined,
+        'list-tree',
+        'changes',
+        folder.uri,
+        vscode.TreeItemCollapsibleState.Collapsed
+      );
+
+      const pendingChangeItems = provider.getChildren(changes);
+      snapshot = {
+        kind: 'workspace',
+        folders: [{ folder, state: { kind: 'not-forge' } }],
+      };
+      const disabled = new Promise<void>((resolve) => {
+        provider.onDidChangeTreeData(() => resolve());
+      });
+      snapshotEmitter.fire(snapshot);
+      await disabled;
+
+      snapshot = {
+        kind: 'workspace',
+        folders: [{ folder, state: { kind: 'forge-enabled' } }],
+      };
+      const reenabled = new Promise<void>((resolve) => {
+        provider.onDidChangeTreeData(() => resolve());
+      });
+      snapshotEmitter.fire(snapshot);
+      assert.strictEqual(callCount, 2);
+
+      resolveDiscoveries[0]?.({
+        kind: 'success',
+        changes: [{ id: 'CHG-OLD', manifestUri: folder.uri }],
+      });
+      assert.deepStrictEqual(await pendingChangeItems, []);
+
+      resolveDiscoveries[1]?.({
+        kind: 'success',
+        changes: [{ id: 'CHG-NEW', manifestUri: folder.uri }],
+      });
+      await reenabled;
+      assert.deepStrictEqual(
+        (await provider.getChildren(changes)).map((item) => item.label),
+        ['CHG-NEW']
+      );
+      assert.strictEqual(callCount, 2);
+    } finally {
+      provider.dispose();
+      snapshotEmitter.dispose();
+    }
+  });
+
   test('caches enabled-folder results and refreshes the projection independently', async () => {
     const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
     let snapshot: ForgeWorkspaceSnapshot = {

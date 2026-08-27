@@ -147,7 +147,11 @@ export class ForgeExplorerProvider
     if (!this.getEnabledFolder(folderUri)) {
       return [];
     }
+    const generation = this.snapshotGeneration;
     const result = await this.discoverFor(folderUri);
+    if (generation !== this.snapshotGeneration || !this.getEnabledFolder(folderUri)) {
+      return [];
+    }
     if (result.kind === 'success') {
       if (result.changes.length === 0) {
         return [new ForgeExplorerItem('No changes', 'changes-empty', undefined, 'info')];
