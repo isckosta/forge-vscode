@@ -12,7 +12,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "workspaceContains:.forge/forge.yml"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [

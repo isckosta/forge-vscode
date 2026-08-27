@@ -1,0 +1,7 @@
+schema: forge/project@1
+
+project:
+  name: fixture
+
+forge:
+  protocol: 2
