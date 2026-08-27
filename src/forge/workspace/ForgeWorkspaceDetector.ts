@@ -1,36 +1,100 @@
 import * as vscode from 'vscode';
 
 /**
- * Canonical Forge project marker (`forge init`, forge-protocol `src/forge_cli/app.py`).
- * `.forge/` and `forge.yml` are staged together and published via a single
- * atomic rename (`forge_cli.workspace.initialize_workspace`), so this file's
- * presence — not merely `.forge/` existing — is the repository-native
- * evidence of an initialized Forge project (`forge/project@1`,
- * `protocol/schemas/project.schema.json`). Detection here intentionally
- * stops at that evidence and does not parse or validate the file's schema,
- * which belongs to the Forge CLI.
+ * `.forge/forge.yml` is workspace configuration, not Core Protocol semantics:
+ * forge-protocol's own `protocol/README.md` states "`protocol/` defines
+ * Forge. `.forge/` configures Forge for a repository." Its role as the
+ * initialization marker comes from the current Forge CLI's `.forge/`
+ * layout — `forge init` stages this file together with the rest of
+ * `.forge/` and publishes it via a single atomic rename
+ * (`forge_cli.workspace.initialize_workspace`), so its presence is
+ * meaningfully stronger evidence than `.forge/` alone existing. That is a
+ * fact about the current CLI implementation and workspace layout, not a
+ * Protocol invariant this extension is entitled to assume permanent.
+ * Detection here relies on that practical contract without elevating it
+ * to Protocol semantics, and does not parse or schema-validate the file
+ * (`forge/project@1`, `protocol/schemas/project.schema.json`), which
+ * remains the CLI's responsibility.
  */
 const PROJECT_MARKER_SEGMENTS = ['.forge', 'forge.yml'] as const;
 
+/**
+ * A closed, sanitized vocabulary for why detection could not reach a
+ * conclusion — enough for diagnostics without forwarding raw error
+ * messages or paths from arbitrary FileSystemProviders.
+ */
+export type ForgeDetectionFailureReason =
+  | 'no-permissions'
+  | 'filesystem-unavailable'
+  | 'indeterminate-file-type'
+  | 'unexpected-error';
+
+export type ForgeDetectionState =
+  | { readonly kind: 'forge-enabled' }
+  | { readonly kind: 'not-forge' }
+  | { readonly kind: 'unknown'; readonly reason: ForgeDetectionFailureReason };
+
+const FORGE_ENABLED: ForgeDetectionState = { kind: 'forge-enabled' };
+const NOT_FORGE: ForgeDetectionState = { kind: 'not-forge' };
+
+function unknown(reason: ForgeDetectionFailureReason): ForgeDetectionState {
+  return { kind: 'unknown', reason };
+}
+
+function classifyMarkerAccessError(error: unknown): ForgeDetectionState {
+  if (error instanceof vscode.FileSystemError) {
+    switch (error.code) {
+      case 'FileNotFound':
+      case 'FileNotADirectory':
+        // A structurally proven absence: no file can exist at this path.
+        return NOT_FORGE;
+      case 'NoPermissions':
+        return unknown('no-permissions');
+      case 'Unavailable':
+        return unknown('filesystem-unavailable');
+      default:
+        return unknown('unexpected-error');
+    }
+  }
+  return unknown('unexpected-error');
+}
+
+export async function detectForgeWorkspaceFolderState(
+  folder: vscode.WorkspaceFolder
+): Promise<ForgeDetectionState> {
+  const markerUri = vscode.Uri.joinPath(folder.uri, ...PROJECT_MARKER_SEGMENTS);
+
+  let stat: vscode.FileStat;
+  try {
+    stat = await vscode.workspace.fs.stat(markerUri);
+  } catch (error) {
+    return classifyMarkerAccessError(error);
+  }
+
+  if ((stat.type & vscode.FileType.File) !== 0) {
+    return FORGE_ENABLED;
+  }
+
+  if (stat.type === vscode.FileType.Unknown) {
+    // The provider itself could not classify this path (FileType.Unknown,
+    // value 0) — that is the provider expressing uncertainty, not proof
+    // the marker is absent, and must not collapse to not-forge.
+    return unknown('indeterminate-file-type');
+  }
+
+  // Any other known, non-file type (e.g. Directory) is structurally
+  // proven: the marker cannot be a regular file there.
+  return NOT_FORGE;
+}
+
 export interface ForgeWorkspaceFolderStatus {
   readonly folder: vscode.WorkspaceFolder;
-  readonly isForgeEnabled: boolean;
+  readonly state: ForgeDetectionState;
 }
 
 export type ForgeWorkspaceSnapshot =
   | { readonly kind: 'no-workspace' }
   | { readonly kind: 'workspace'; readonly folders: readonly ForgeWorkspaceFolderStatus[] };
-
-export async function isForgeWorkspaceFolder(folder: vscode.WorkspaceFolder): Promise<boolean> {
-  const markerUri = vscode.Uri.joinPath(folder.uri, ...PROJECT_MARKER_SEGMENTS);
-
-  try {
-    const stat = await vscode.workspace.fs.stat(markerUri);
-    return (stat.type & vscode.FileType.File) !== 0;
-  } catch {
-    return false;
-  }
-}
 
 interface ForgeWorkspaceDetectorDependencies {
   getWorkspaceFolders: () => readonly vscode.WorkspaceFolder[] | undefined;
@@ -73,7 +137,7 @@ export class ForgeWorkspaceDetector implements vscode.Disposable {
               folders.map(
                 async (folder): Promise<ForgeWorkspaceFolderStatus> => ({
                   folder,
-                  isForgeEnabled: await isForgeWorkspaceFolder(folder),
+                  state: await detectForgeWorkspaceFolderState(folder),
                 })
               )
             ),

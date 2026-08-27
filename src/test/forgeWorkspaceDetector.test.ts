@@ -1,9 +1,10 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import {
+  detectForgeWorkspaceFolderState,
+  ForgeDetectionState,
   ForgeWorkspaceDetector,
   ForgeWorkspaceSnapshot,
-  isForgeWorkspaceFolder,
 } from '../forge/workspace/ForgeWorkspaceDetector';
 
 function fixtureUri(...segments: string[]): vscode.Uri {
@@ -16,89 +17,167 @@ function workspaceFolder(uri: vscode.Uri, name: string, index = 0): vscode.Works
   return { uri, name, index };
 }
 
-suite('isForgeWorkspaceFolder', () => {
-  test('returns true when .forge/forge.yml is present', async () => {
+class StubFileSystemProvider implements vscode.FileSystemProvider {
+  private readonly onDidChangeFileEmitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
+  readonly onDidChangeFile = this.onDidChangeFileEmitter.event;
+
+  constructor(private readonly statImpl: (uri: vscode.Uri) => vscode.FileStat) {}
+
+  watch(): vscode.Disposable {
+    return new vscode.Disposable(() => undefined);
+  }
+
+  stat(uri: vscode.Uri): vscode.FileStat {
+    return this.statImpl(uri);
+  }
+
+  readDirectory(): [string, vscode.FileType][] {
+    return [];
+  }
+
+  createDirectory(): void {
+    // Not needed by these fixtures.
+  }
+
+  readFile(): Uint8Array {
+    return new Uint8Array();
+  }
+
+  writeFile(): void {
+    // Not needed by these fixtures.
+  }
+
+  delete(): void {
+    // Not needed by these fixtures.
+  }
+
+  rename(): void {
+    // Not needed by these fixtures.
+  }
+}
+
+async function withStubScheme(
+  scheme: string,
+  statImpl: (uri: vscode.Uri) => vscode.FileStat,
+  use: (root: vscode.Uri) => Promise<void>
+): Promise<void> {
+  const registration = vscode.workspace.registerFileSystemProvider(
+    scheme,
+    new StubFileSystemProvider(statImpl),
+    { isCaseSensitive: true }
+  );
+  try {
+    await use(vscode.Uri.from({ scheme, path: '/workspace' }));
+  } finally {
+    registration.dispose();
+  }
+}
+
+suite('detectForgeWorkspaceFolderState', () => {
+  test('returns forge-enabled when .forge/forge.yml is present', async () => {
     const folder = workspaceFolder(fixtureUri('forge-enabled'), 'forge-enabled');
-    assert.strictEqual(await isForgeWorkspaceFolder(folder), true);
+    assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), { kind: 'forge-enabled' });
   });
 
-  test('returns false for an ordinary repository with no .forge/ at all', async () => {
+  test('returns not-forge for an ordinary repository with no .forge/ at all', async () => {
     const folder = workspaceFolder(fixtureUri('plain-repo'), 'plain-repo');
-    assert.strictEqual(await isForgeWorkspaceFolder(folder), false);
+    assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), { kind: 'not-forge' });
   });
 
-  test('returns false when .forge/ exists but forge.yml does not', async () => {
+  test('returns not-forge when .forge/ exists but forge.yml does not', async () => {
     const folder = workspaceFolder(
       fixtureUri('forge-dir-without-marker'),
       'forge-dir-without-marker'
     );
-    assert.strictEqual(await isForgeWorkspaceFolder(folder), false);
+    assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), { kind: 'not-forge' });
   });
 
-  test('returns false for a folder that does not exist at all', async () => {
+  test('returns not-forge for a folder that does not exist at all', async () => {
     const folder = workspaceFolder(fixtureUri('does-not-exist'), 'does-not-exist');
-    assert.strictEqual(await isForgeWorkspaceFolder(folder), false);
+    assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), { kind: 'not-forge' });
+  });
+
+  test('returns not-forge when the marker path exists but is a directory', async () => {
+    const folder = workspaceFolder(
+      fixtureUri('forge-marker-is-directory'),
+      'forge-marker-is-directory'
+    );
+    assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), { kind: 'not-forge' });
   });
 
   test('works against non-local URI schemes, not only the local filesystem', async () => {
-    const scheme = 'forge-test-vfs';
-    const memfs = new (class implements vscode.FileSystemProvider {
-      private readonly files = new Map<string, Uint8Array>();
-      private readonly onDidChangeFileEmitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
-      readonly onDidChangeFile = this.onDidChangeFileEmitter.event;
-
-      watch(): vscode.Disposable {
-        return new vscode.Disposable(() => undefined);
+    await withStubScheme(
+      'forge-test-vfs',
+      () => ({ type: vscode.FileType.File, ctime: 0, mtime: 0, size: 0 }),
+      async (root) => {
+        const folder = workspaceFolder(root, 'virtual-workspace');
+        assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), {
+          kind: 'forge-enabled',
+        });
       }
+    );
+  });
 
-      stat(uri: vscode.Uri): vscode.FileStat {
-        if (!this.files.has(uri.path)) {
-          throw vscode.FileSystemError.FileNotFound(uri);
-        }
-        return { type: vscode.FileType.File, ctime: 0, mtime: 0, size: 0 };
+  test('returns unknown with reason indeterminate-file-type when the provider cannot classify the marker', async () => {
+    await withStubScheme(
+      'forge-test-unknown-file-type',
+      () => ({ type: vscode.FileType.Unknown, ctime: 0, mtime: 0, size: 0 }),
+      async (root) => {
+        const folder = workspaceFolder(root, 'unknown-file-type-workspace');
+        assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), {
+          kind: 'unknown',
+          reason: 'indeterminate-file-type',
+        });
       }
+    );
+  });
 
-      readDirectory(): [string, vscode.FileType][] {
-        return [];
+  test('returns unknown with reason no-permissions when access is denied', async () => {
+    await withStubScheme(
+      'forge-test-no-permissions',
+      (uri) => {
+        throw vscode.FileSystemError.NoPermissions(uri);
+      },
+      async (root) => {
+        const folder = workspaceFolder(root, 'no-permissions-workspace');
+        assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), {
+          kind: 'unknown',
+          reason: 'no-permissions',
+        });
       }
+    );
+  });
 
-      createDirectory(): void {
-        // No-op: directories are implicit for this fixture provider.
+  test('returns unknown with reason filesystem-unavailable when the provider is unavailable', async () => {
+    await withStubScheme(
+      'forge-test-unavailable',
+      (uri) => {
+        throw vscode.FileSystemError.Unavailable(uri);
+      },
+      async (root) => {
+        const folder = workspaceFolder(root, 'unavailable-workspace');
+        assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), {
+          kind: 'unknown',
+          reason: 'filesystem-unavailable',
+        });
       }
+    );
+  });
 
-      readFile(): Uint8Array {
-        return new Uint8Array();
+  test('returns unknown with reason unexpected-error for any other failure', async () => {
+    await withStubScheme(
+      'forge-test-unexpected',
+      () => {
+        throw new Error('boom');
+      },
+      async (root) => {
+        const folder = workspaceFolder(root, 'unexpected-error-workspace');
+        assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), {
+          kind: 'unknown',
+          reason: 'unexpected-error',
+        });
       }
-
-      writeFile(uri: vscode.Uri, content: Uint8Array): void {
-        this.files.set(uri.path, content);
-      }
-
-      delete(): void {
-        // Not needed by this fixture provider.
-      }
-
-      rename(): void {
-        // Not needed by this fixture provider.
-      }
-    })();
-
-    const providerRegistration = vscode.workspace.registerFileSystemProvider(scheme, memfs, {
-      isCaseSensitive: true,
-    });
-
-    try {
-      const root = vscode.Uri.from({ scheme, path: '/workspace' });
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.joinPath(root, '.forge', 'forge.yml'),
-        new Uint8Array()
-      );
-
-      const folder = workspaceFolder(root, 'virtual-workspace');
-      assert.strictEqual(await isForgeWorkspaceFolder(folder), true);
-    } finally {
-      providerRegistration.dispose();
-    }
+    );
   });
 });
 
@@ -130,7 +209,7 @@ suite('ForgeWorkspaceDetector', () => {
     }
   });
 
-  test('evaluates each multi-root folder independently', async () => {
+  test('evaluates each multi-root folder independently, propagating the tri-state result', async () => {
     const forgeFolder = workspaceFolder(fixtureUri('forge-enabled'), 'forge-enabled', 0);
     const plainFolder = workspaceFolder(fixtureUri('plain-repo'), 'plain-repo', 1);
 
@@ -144,15 +223,48 @@ suite('ForgeWorkspaceDetector', () => {
       assert.strictEqual(snapshot.kind, 'workspace');
       assert.deepStrictEqual(
         snapshot.kind === 'workspace' &&
-          snapshot.folders.map((status) => [status.folder.name, status.isForgeEnabled]),
+          snapshot.folders.map((status) => [status.folder.name, status.state.kind]),
         [
-          ['forge-enabled', true],
-          ['plain-repo', false],
+          ['forge-enabled', 'forge-enabled'],
+          ['plain-repo', 'not-forge'],
         ]
       );
     } finally {
       detector.dispose();
     }
+  });
+
+  test('propagates an unknown state for a folder whose marker cannot be accessed', async () => {
+    await withStubScheme(
+      'forge-test-detector-unknown',
+      (uri) => {
+        throw vscode.FileSystemError.NoPermissions(uri);
+      },
+      async (root) => {
+        const forgeFolder = workspaceFolder(fixtureUri('forge-enabled'), 'forge-enabled', 0);
+        const deniedFolder = workspaceFolder(root, 'denied-workspace', 1);
+
+        const detector = new ForgeWorkspaceDetector({
+          getWorkspaceFolders: () => [forgeFolder, deniedFolder],
+          onDidChangeWorkspaceFolders: new vscode.EventEmitter<unknown>().event,
+        });
+
+        try {
+          const snapshot = await detector.refresh();
+          assert.strictEqual(snapshot.kind, 'workspace');
+          assert.deepStrictEqual(
+            snapshot.kind === 'workspace' &&
+              snapshot.folders.map((status) => [status.folder.name, status.state]),
+            [
+              ['forge-enabled', { kind: 'forge-enabled' }],
+              ['denied-workspace', { kind: 'unknown', reason: 'no-permissions' }],
+            ]
+          );
+        } finally {
+          detector.dispose();
+        }
+      }
+    );
   });
 
   test('re-evaluates when workspace folders change and notifies listeners', async () => {
@@ -184,10 +296,9 @@ suite('ForgeWorkspaceDetector', () => {
 
       const snapshot = detector.getSnapshot();
       assert.strictEqual(snapshot.kind, 'workspace');
-      assert.strictEqual(
-        snapshot.kind === 'workspace' && snapshot.folders[0]?.isForgeEnabled,
-        true
-      );
+      const state: ForgeDetectionState | undefined =
+        snapshot.kind === 'workspace' ? snapshot.folders[0]?.state : undefined;
+      assert.deepStrictEqual(state, { kind: 'forge-enabled' });
       assert.ok(snapshots.length >= 2, 'listener should observe both the initial and updated snapshot');
     } finally {
       detector.dispose();
