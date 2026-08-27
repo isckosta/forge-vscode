@@ -3,23 +3,50 @@ import {
   ForgeDetectionFailureReason,
   ForgeWorkspaceSnapshot,
 } from '../forge/workspace/ForgeWorkspaceDetector';
+import {
+  ForgeChangeDiscovery,
+  ForgeChangeDiscoveryResult,
+} from '../forge/changes/ForgeChangeDiscovery';
 
 export interface ForgeWorkspaceSnapshotSource {
   readonly onDidChangeSnapshot: vscode.Event<ForgeWorkspaceSnapshot>;
   getSnapshot(): ForgeWorkspaceSnapshot;
 }
 
+export interface ForgeChangeDiscoverySource {
+  discover(folder: vscode.WorkspaceFolder): Promise<ForgeChangeDiscoveryResult>;
+}
+
+type ForgeExplorerItemKind = 'workspace' | 'changes' | 'change' | 'state' | 'status';
+
 export class ForgeExplorerItem extends vscode.TreeItem {
+  readonly kind: ForgeExplorerItemKind;
+  readonly folderUri?: vscode.Uri;
+
   constructor(
     label: string,
-    contextValue: 'forge-enabled' | 'not-forge' | 'unknown' | 'no-workspace',
+    contextValue:
+      | 'forge-enabled'
+      | 'not-forge'
+      | 'unknown'
+      | 'no-workspace'
+      | 'changes'
+      | 'change'
+      | 'changes-empty'
+      | 'changes-unavailable'
+      | 'changes-invalid',
     description?: string,
-    iconId?: string
+    iconId?: string,
+    kind: ForgeExplorerItemKind = 'status',
+    folderUri?: vscode.Uri,
+    collapsibleState: vscode.TreeItemCollapsibleState = vscode.TreeItemCollapsibleState.None
   ) {
-    super(label, vscode.TreeItemCollapsibleState.None);
+    super(label, collapsibleState);
     this.contextValue = contextValue;
     this.description = description;
     this.iconPath = iconId ? new vscode.ThemeIcon(iconId) : undefined;
+    this.kind = kind;
+    this.folderUri = folderUri;
   }
 }
 
@@ -37,15 +64,17 @@ export class ForgeExplorerProvider
     ForgeExplorerItem | undefined
   >();
   private readonly snapshotSubscription: vscode.Disposable;
+  private readonly discovery: ForgeChangeDiscoverySource;
+  private readonly discoveryResults = new Map<string, ForgeChangeDiscoveryResult>();
   private snapshot: ForgeWorkspaceSnapshot;
 
   readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
-  constructor(source: ForgeWorkspaceSnapshotSource) {
+  constructor(source: ForgeWorkspaceSnapshotSource, discovery: ForgeChangeDiscoverySource = new ForgeChangeDiscovery()) {
+    this.discovery = discovery;
     this.snapshot = source.getSnapshot();
     this.snapshotSubscription = source.onDidChangeSnapshot((snapshot) => {
-      this.snapshot = snapshot;
-      this.onDidChangeTreeDataEmitter.fire(undefined);
+      void this.refreshProjection(snapshot);
     });
   }
 
@@ -53,8 +82,14 @@ export class ForgeExplorerProvider
     return item;
   }
 
-  getChildren(element?: ForgeExplorerItem): ForgeExplorerItem[] {
+  getChildren(element?: ForgeExplorerItem): ForgeExplorerItem[] | Thenable<ForgeExplorerItem[]> {
     if (element) {
+      if (element.kind === 'workspace' && element.folderUri) {
+        return this.getChanges(element.folderUri);
+      }
+      if (element.kind === 'changes' && element.folderUri) {
+        return this.getChangeItems(element.folderUri);
+      }
       return [];
     }
 
@@ -67,7 +102,15 @@ export class ForgeExplorerProvider
     return this.snapshot.folders.map(({ folder, state }) => {
       switch (state.kind) {
         case 'forge-enabled':
-          return new ForgeExplorerItem(folder.name, 'forge-enabled', 'Forge enabled', 'pass');
+          return new ForgeExplorerItem(
+            folder.name,
+            'forge-enabled',
+            'Forge enabled',
+            'pass',
+            'workspace',
+            folder.uri,
+            vscode.TreeItemCollapsibleState.Collapsed
+          );
         case 'not-forge':
           return new ForgeExplorerItem(folder.name, 'not-forge', 'Not Forge', 'circle-slash');
         case 'unknown':
@@ -79,6 +122,86 @@ export class ForgeExplorerProvider
           );
       }
     });
+  }
+
+  private async getChanges(folderUri: vscode.Uri): Promise<ForgeExplorerItem[]> {
+    await this.discoverFor(folderUri);
+    return [
+      new ForgeExplorerItem(
+        'Changes',
+        'changes',
+        undefined,
+        'list-tree',
+        'changes',
+        folderUri,
+        vscode.TreeItemCollapsibleState.Collapsed
+      ),
+    ];
+  }
+
+  private async getChangeItems(folderUri: vscode.Uri): Promise<ForgeExplorerItem[]> {
+    const result = await this.discoverFor(folderUri);
+    if (result.kind === 'success') {
+      if (result.changes.length === 0) {
+        return [new ForgeExplorerItem('No changes', 'changes-empty', undefined, 'info')];
+      }
+      return result.changes.map(
+        (change) => new ForgeExplorerItem(change.id, 'change', undefined, 'file', 'change')
+      );
+    }
+
+    return [
+      new ForgeExplorerItem(
+        result.kind === 'invalid' ? 'Changes invalid' : 'Changes unavailable',
+        result.kind === 'invalid' ? 'changes-invalid' : 'changes-unavailable',
+        result.message,
+        'warning'
+      ),
+    ];
+  }
+
+  private async discoverFor(folderUri: vscode.Uri): Promise<ForgeChangeDiscoveryResult> {
+    const key = folderUri.toString();
+    const cached = this.discoveryResults.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    const folder = this.snapshot.kind === 'workspace'
+      ? this.snapshot.folders.find(({ folder }) => folder.uri.toString() === key)?.folder
+      : undefined;
+    if (!folder) {
+      return { kind: 'unavailable', message: 'Change discovery is unavailable.' };
+    }
+
+    const result = await this.discovery.discover(folder);
+    this.discoveryResults.set(key, result);
+    return result;
+  }
+
+  private async refreshProjection(snapshot: ForgeWorkspaceSnapshot): Promise<void> {
+    this.snapshot = snapshot;
+    const enabledKeys = new Set(
+      snapshot.kind === 'workspace'
+        ? snapshot.folders
+            .filter(({ state }) => state.kind === 'forge-enabled')
+            .map(({ folder }) => folder.uri.toString())
+        : []
+    );
+    for (const key of this.discoveryResults.keys()) {
+      if (!enabledKeys.has(key)) {
+        this.discoveryResults.delete(key);
+      }
+    }
+
+    if (snapshot.kind === 'workspace') {
+      await Promise.all(
+        snapshot.folders
+          .filter(({ state }) => state.kind === 'forge-enabled')
+          .map(({ folder }) => this.discoverFor(folder.uri))
+      );
+    }
+    this.onDidChangeTreeDataEmitter.fire(undefined);
   }
 
   dispose(): void {
