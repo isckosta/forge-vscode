@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
   ForgeExplorerProvider,
   ForgeExplorerItem,
+  ForgeWorkspaceSnapshotSource,
 } from '../views/ForgeExplorerProvider';
 import {
   ForgeWorkspaceSnapshot,
@@ -18,6 +19,98 @@ function workspaceFolder(name: string, index = 0): vscode.WorkspaceFolder {
 }
 
 suite('ForgeExplorerProvider', () => {
+  test('refreshes only the affected workspace on filesystem refresh', async () => {
+    const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+    const watcherEvents = new Map<string, vscode.EventEmitter<vscode.Uri>>();
+    const folders = [workspaceFolder('first'), workspaceFolder('second', 1)];
+    const ids = new Map(folders.map((folder) => [folder.name, 'CHG-0001']));
+    const discovered: StubChangeDiscovery = {
+      discover: async (folder) => ({
+        kind: 'success',
+        changes: [{ id: ids.get(folder.name)!, manifestUri: folder.uri }],
+      }),
+    };
+    const watcherFactory = {
+      createFileSystemWatcher: (pattern: vscode.GlobPattern): vscode.FileSystemWatcher => {
+        const events = new vscode.EventEmitter<vscode.Uri>();
+        const patternKey =
+          pattern instanceof vscode.RelativePattern
+            ? vscode.Uri.joinPath(pattern.baseUri, pattern.pattern).toString()
+            : pattern.toString();
+        watcherEvents.set(patternKey, events);
+        return {
+          onDidCreate: events.event,
+          onDidChange: events.event,
+          onDidDelete: events.event,
+          ignoreCreateEvents: false,
+          ignoreChangeEvents: false,
+          ignoreDeleteEvents: false,
+          dispose: () => events.dispose(),
+        };
+      },
+    };
+    const provider = new (ForgeExplorerProvider as unknown as new (
+      source: ForgeWorkspaceSnapshotSource,
+      discovery: StubChangeDiscovery,
+      watcherFactory: {
+        createFileSystemWatcher: (pattern: vscode.GlobPattern) => vscode.FileSystemWatcher;
+      }
+    ) => ForgeExplorerProvider)(
+      {
+        getSnapshot: () => ({
+          kind: 'workspace',
+          folders: folders.map((folder) => ({
+            folder,
+            state: { kind: 'forge-enabled' as const },
+          })),
+        }),
+        onDidChangeSnapshot: snapshotEmitter.event,
+      },
+      discovered,
+      watcherFactory
+    );
+
+    try {
+      const workspaces = await provider.getChildren();
+      const changes = await Promise.all(workspaces.map((workspace) => provider.getChildren(workspace)));
+      const changeSections = changes.map(([item]) => item);
+      assert.ok(changeSections[0]);
+      assert.ok(changeSections[1]);
+      assert.deepStrictEqual((await provider.getChildren(changeSections[0])).map((item) => item.label), [
+        'CHG-0001',
+      ]);
+      assert.deepStrictEqual((await provider.getChildren(changeSections[1])).map((item) => item.label), [
+        'CHG-0001',
+      ]);
+
+      let refreshCount = 0;
+      const refreshed = new Promise<void>((resolve) => {
+        provider.onDidChangeTreeData(() => {
+          refreshCount += 1;
+          resolve();
+        });
+      });
+      ids.set('first', 'CHG-0002');
+      const firstChangesPath = vscode.Uri.joinPath(folders[0]!.uri, '.forge', 'changes', '**');
+      watcherEvents.get(firstChangesPath.toString())?.fire(vscode.Uri.joinPath(folders[0]!.uri, 'manifest.yml'));
+      await Promise.race([
+        refreshed,
+        new Promise<void>((resolve) => setImmediate(resolve)),
+      ]);
+
+      assert.strictEqual(refreshCount, 1);
+      assert.deepStrictEqual((await provider.getChildren(changeSections[0])).map((item) => item.label), [
+        'CHG-0002',
+      ]);
+      assert.deepStrictEqual((await provider.getChildren(changeSections[1])).map((item) => item.label), [
+        'CHG-0001',
+      ]);
+    } finally {
+      provider.dispose();
+      snapshotEmitter.dispose();
+    }
+  });
+
   test('projects no-workspace as an explicit tree item', async () => {
     const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
     const provider = new ForgeExplorerProvider({

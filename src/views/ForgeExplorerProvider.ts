@@ -17,6 +17,10 @@ export interface ForgeChangeDiscoverySource {
   discover(folder: vscode.WorkspaceFolder): Promise<ForgeChangeDiscoveryResult>;
 }
 
+export interface ForgeFileSystemWatcherFactory {
+  createFileSystemWatcher(pattern: vscode.GlobPattern): vscode.FileSystemWatcher;
+}
+
 type ForgeExplorerItemKind = 'workspace' | 'changes' | 'change' | 'state' | 'status';
 
 export class ForgeExplorerItem extends vscode.TreeItem {
@@ -65,15 +69,25 @@ export class ForgeExplorerProvider
   >();
   private readonly snapshotSubscription: vscode.Disposable;
   private readonly discovery: ForgeChangeDiscoverySource;
+  private readonly watcherFactory: ForgeFileSystemWatcherFactory;
   private readonly discoveryResults = new Map<string, ForgeChangeDiscoveryResult>();
+  private readonly watchers = new Map<string, vscode.Disposable>();
+  private readonly filesystemRefreshes = new Set<string>();
   private snapshot: ForgeWorkspaceSnapshot;
   private snapshotGeneration = 0;
+  private disposed = false;
 
   readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
-  constructor(source: ForgeWorkspaceSnapshotSource, discovery: ForgeChangeDiscoverySource = new ForgeChangeDiscovery()) {
+  constructor(
+    source: ForgeWorkspaceSnapshotSource,
+    discovery: ForgeChangeDiscoverySource = new ForgeChangeDiscovery(),
+    watcherFactory: ForgeFileSystemWatcherFactory = vscode.workspace
+  ) {
     this.discovery = discovery;
+    this.watcherFactory = watcherFactory;
     this.snapshot = source.getSnapshot();
+    this.reconcileWatchers(this.snapshot);
     this.snapshotSubscription = source.onDidChangeSnapshot((snapshot) => {
       void this.refreshProjection(snapshot);
     });
@@ -189,7 +203,11 @@ export class ForgeExplorerProvider
 
     const generation = this.snapshotGeneration;
     const result = await this.discovery.discover(folder);
-    if (generation === this.snapshotGeneration && this.getEnabledFolder(folderUri)) {
+    if (
+      !this.disposed &&
+      generation === this.snapshotGeneration &&
+      this.getEnabledFolder(folderUri)
+    ) {
       this.discoveryResults.set(key, result);
     }
     return result;
@@ -206,8 +224,12 @@ export class ForgeExplorerProvider
   }
 
   private async refreshProjection(snapshot: ForgeWorkspaceSnapshot): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     this.snapshotGeneration += 1;
     this.snapshot = snapshot;
+    this.reconcileWatchers(snapshot);
     const enabledKeys = new Set(
       snapshot.kind === 'workspace'
         ? snapshot.folders
@@ -228,11 +250,83 @@ export class ForgeExplorerProvider
           .map(({ folder }) => this.discoverFor(folder.uri))
       );
     }
-    this.onDidChangeTreeDataEmitter.fire(undefined);
+    if (!this.disposed) {
+      this.onDidChangeTreeDataEmitter.fire(undefined);
+    }
   }
 
   dispose(): void {
+    this.disposed = true;
     this.snapshotSubscription.dispose();
+    for (const watcher of this.watchers.values()) {
+      watcher.dispose();
+    }
+    this.watchers.clear();
     this.onDidChangeTreeDataEmitter.dispose();
+  }
+
+  private reconcileWatchers(snapshot: ForgeWorkspaceSnapshot): void {
+    const enabledFolders =
+      snapshot.kind === 'workspace'
+        ? snapshot.folders.filter(({ state }) => state.kind === 'forge-enabled')
+        : [];
+    const enabledKeys = new Set(enabledFolders.map(({ folder }) => folder.uri.toString()));
+
+    for (const [key, watcher] of this.watchers) {
+      if (!enabledKeys.has(key)) {
+        watcher.dispose();
+        this.watchers.delete(key);
+      }
+    }
+
+    for (const { folder } of enabledFolders) {
+      const key = folder.uri.toString();
+      if (this.watchers.has(key)) {
+        continue;
+      }
+
+      const pattern = new vscode.RelativePattern(folder.uri, '.forge/changes/**');
+      const watcher = this.watcherFactory.createFileSystemWatcher(pattern);
+      const subscriptions = [
+        watcher.onDidCreate(() => void this.refreshFromFilesystem(folder.uri)),
+        watcher.onDidChange(() => void this.refreshFromFilesystem(folder.uri)),
+        watcher.onDidDelete(() => void this.refreshFromFilesystem(folder.uri)),
+      ];
+      this.watchers.set(
+        key,
+        new vscode.Disposable(() => {
+          for (const subscription of subscriptions) {
+            subscription.dispose();
+          }
+          watcher.dispose();
+        })
+      );
+    }
+  }
+
+  private async refreshFromFilesystem(folderUri: vscode.Uri): Promise<void> {
+    if (this.disposed || !this.getEnabledFolder(folderUri)) {
+      return;
+    }
+
+    const key = folderUri.toString();
+    if (this.filesystemRefreshes.has(key)) {
+      return;
+    }
+    this.filesystemRefreshes.add(key);
+    const generation = this.snapshotGeneration;
+    try {
+      this.discoveryResults.delete(key);
+      await this.discoverFor(folderUri);
+      if (
+        !this.disposed &&
+        generation === this.snapshotGeneration &&
+        this.getEnabledFolder(folderUri)
+      ) {
+        this.onDidChangeTreeDataEmitter.fire(undefined);
+      }
+    } finally {
+      this.filesystemRefreshes.delete(key);
+    }
   }
 }
