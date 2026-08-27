@@ -129,7 +129,11 @@ export class ForgeExplorerProvider
     if (!this.getEnabledFolder(folderUri)) {
       return [];
     }
+    const generation = this.snapshotGeneration;
     await this.discoverFor(folderUri);
+    if (generation !== this.snapshotGeneration || !this.getEnabledFolder(folderUri)) {
+      return [];
+    }
     return [
       new ForgeExplorerItem(
         'Changes',
