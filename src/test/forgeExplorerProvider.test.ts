@@ -141,6 +141,9 @@ suite('ForgeExplorerProvider', () => {
               ? 'changes-unavailable'
               : 'changes-invalid'
         );
+        if (workspace.label === 'empty') {
+          assert.strictEqual(state.label, 'No Changes found');
+        }
       }
     } finally {
       provider.dispose();

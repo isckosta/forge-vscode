@@ -158,7 +158,7 @@ export class ForgeExplorerProvider
     }
     if (result.kind === 'success') {
       if (result.changes.length === 0) {
-        return [new ForgeExplorerItem('No changes', 'changes-empty', undefined, 'info')];
+        return [new ForgeExplorerItem('No Changes found', 'changes-empty', undefined, 'info')];
       }
       return result.changes.map(
         (change) => new ForgeExplorerItem(change.id, 'change', undefined, 'file', 'change')
