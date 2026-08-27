@@ -193,6 +193,72 @@ suite('ForgeExplorerProvider', () => {
     }
   });
 
+  test('replays a filesystem refresh across an enabled snapshot update', async () => {
+    const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+    const folder = workspaceFolder('snapshot-changing');
+    let snapshot: ForgeWorkspaceSnapshot = {
+      kind: 'workspace',
+      folders: [{ folder, state: { kind: 'forge-enabled' as const } }],
+    };
+    const watcherEvents = new vscode.EventEmitter<vscode.Uri>();
+    const watcherFactory: ForgeFileSystemWatcherFactory = {
+      createFileSystemWatcher: () => ({
+        onDidCreate: watcherEvents.event,
+        onDidChange: watcherEvents.event,
+        onDidDelete: watcherEvents.event,
+        ignoreCreateEvents: false,
+        ignoreChangeEvents: false,
+        ignoreDeleteEvents: false,
+        dispose: () => watcherEvents.dispose(),
+      }),
+    };
+    const pending: Array<(result: ForgeChangeDiscoveryResult) => void> = [];
+    let calls = 0;
+    const discovered: StubChangeDiscovery = {
+      discover: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return { kind: 'success', changes: [{ id: 'CHG-0001', manifestUri: folder.uri }] };
+        }
+        return new Promise<ForgeChangeDiscoveryResult>((resolve) => pending.push(resolve));
+      },
+    };
+    const provider = new (ForgeExplorerProvider as unknown as new (
+      source: ForgeWorkspaceSnapshotSource,
+      discovery: StubChangeDiscovery,
+      watcherFactory: ForgeFileSystemWatcherFactory
+    ) => ForgeExplorerProvider)(
+      { getSnapshot: () => snapshot, onDidChangeSnapshot: snapshotEmitter.event },
+      discovered,
+      watcherFactory
+    );
+
+    try {
+      const [workspace] = await provider.getChildren();
+      assert.ok(workspace);
+      await provider.getChildren(workspace);
+      watcherEvents.fire(vscode.Uri.joinPath(folder.uri, 'change'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      snapshot = {
+        kind: 'workspace',
+        folders: [{ folder, state: { kind: 'forge-enabled' as const } }],
+      };
+      snapshotEmitter.fire(snapshot);
+
+      pending[0]?.({ kind: 'success', changes: [{ id: 'CHG-0002', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.strictEqual(calls, 4);
+      pending[1]?.({ kind: 'success', changes: [{ id: 'CHG-SNAPSHOT', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      pending[2]?.({ kind: 'success', changes: [{ id: 'CHG-0003', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      provider.dispose();
+      snapshotEmitter.dispose();
+    }
+  });
+
   test('replays a pending filesystem event after an enabled snapshot change', async () => {
     const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
     const folder = workspaceFolder('snapshot-changing');

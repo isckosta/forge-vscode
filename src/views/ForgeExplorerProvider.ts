@@ -319,7 +319,7 @@ export class ForgeExplorerProvider
     this.filesystemRefreshes.add(key);
     try {
       do {
-        const hadPendingFilesystemRefresh = this.dirtyFilesystemRefreshes.delete(key);
+        this.dirtyFilesystemRefreshes.delete(key);
         const generation = this.snapshotGeneration;
         this.discoveryVersions.set(key, (this.discoveryVersions.get(key) ?? 0) + 1);
         this.discoveryResults.delete(key);
@@ -329,11 +329,7 @@ export class ForgeExplorerProvider
         }
 
         if (generation !== this.snapshotGeneration) {
-          if (hadPendingFilesystemRefresh || this.dirtyFilesystemRefreshes.has(key)) {
-            this.dirtyFilesystemRefreshes.add(key);
-          } else {
-            break;
-          }
+          this.dirtyFilesystemRefreshes.add(key);
         }
 
         if (!this.dirtyFilesystemRefreshes.has(key)) {

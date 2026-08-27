@@ -212,6 +212,11 @@ They are not another persistence model.
 
 ## Forge Explorer
 
+The Forge Explorer is a read-only projection of detected workspace state. For
+each Forge-enabled workspace folder, it lists the repository-native Change IDs
+found in `.forge/changes`. Empty, unavailable, and invalid Change state is
+shown explicitly instead of being presented as a valid empty list.
+
 The initial Forge Explorer is expected to provide a repository overview similar to:
 
 ```text
