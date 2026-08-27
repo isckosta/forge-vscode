@@ -118,6 +118,20 @@ suite('detectForgeWorkspaceFolderState', () => {
     );
   });
 
+  test('returns unknown with reason indeterminate-file-type when the provider cannot classify the marker', async () => {
+    await withStubScheme(
+      'forge-test-unknown-file-type',
+      () => ({ type: vscode.FileType.Unknown, ctime: 0, mtime: 0, size: 0 }),
+      async (root) => {
+        const folder = workspaceFolder(root, 'unknown-file-type-workspace');
+        assert.deepStrictEqual(await detectForgeWorkspaceFolderState(folder), {
+          kind: 'unknown',
+          reason: 'indeterminate-file-type',
+        });
+      }
+    );
+  });
+
   test('returns unknown with reason no-permissions when access is denied', async () => {
     await withStubScheme(
       'forge-test-no-permissions',

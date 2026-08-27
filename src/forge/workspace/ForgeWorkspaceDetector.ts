@@ -23,7 +23,11 @@ const PROJECT_MARKER_SEGMENTS = ['.forge', 'forge.yml'] as const;
  * conclusion — enough for diagnostics without forwarding raw error
  * messages or paths from arbitrary FileSystemProviders.
  */
-export type ForgeDetectionFailureReason = 'no-permissions' | 'filesystem-unavailable' | 'unexpected-error';
+export type ForgeDetectionFailureReason =
+  | 'no-permissions'
+  | 'filesystem-unavailable'
+  | 'indeterminate-file-type'
+  | 'unexpected-error';
 
 export type ForgeDetectionState =
   | { readonly kind: 'forge-enabled' }
@@ -67,9 +71,20 @@ export async function detectForgeWorkspaceFolderState(
     return classifyMarkerAccessError(error);
   }
 
-  // The marker path resolved to something other than a regular file (e.g.
-  // a directory) — that is structurally proven, not indeterminate.
-  return (stat.type & vscode.FileType.File) !== 0 ? FORGE_ENABLED : NOT_FORGE;
+  if ((stat.type & vscode.FileType.File) !== 0) {
+    return FORGE_ENABLED;
+  }
+
+  if (stat.type === vscode.FileType.Unknown) {
+    // The provider itself could not classify this path (FileType.Unknown,
+    // value 0) — that is the provider expressing uncertainty, not proof
+    // the marker is absent, and must not collapse to not-forge.
+    return unknown('indeterminate-file-type');
+  }
+
+  // Any other known, non-file type (e.g. Directory) is structurally
+  // proven: the marker cannot be a regular file there.
+  return NOT_FORGE;
 }
 
 export interface ForgeWorkspaceFolderStatus {
