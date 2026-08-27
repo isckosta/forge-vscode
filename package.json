@@ -1,0 +1,44 @@
+{
+  "name": "forge-vscode",
+  "displayName": "Forge for VS Code",
+  "description": "Visual Studio Code integration for the Forge Protocol.",
+  "version": "0.0.1",
+  "publisher": "forge-protocol",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "forge.showVersion",
+        "title": "Forge: Show Version"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "pretest": "npm run compile",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.9.0",
+    "@types/mocha": "^10.0.7",
+    "@types/node": "^20.14.15",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.4.1",
+    "eslint": "^9.9.0",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.0.0"
+  }
+}
