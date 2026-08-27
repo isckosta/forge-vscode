@@ -13,6 +13,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:forge.explorer",
     "workspaceContains:.forge/forge.yml"
   ],
   "main": "./out/extension.js",
@@ -22,7 +23,24 @@
         "command": "forge.showVersion",
         "title": "Forge: Show Version"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "forge",
+          "title": "Forge",
+          "icon": "$(tools)"
+        }
+      ]
+    },
+    "views": {
+      "forge": [
+        {
+          "id": "forge.explorer",
+          "name": "Explorer"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
