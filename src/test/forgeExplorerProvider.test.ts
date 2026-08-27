@@ -332,6 +332,81 @@ suite('ForgeExplorerProvider', () => {
     }
   });
 
+  test('does not cache or expose a discovery resolved after enablement is lost', async () => {
+    const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+    const folder = workspaceFolder('reused');
+    let snapshot: ForgeWorkspaceSnapshot = {
+      kind: 'workspace',
+      folders: [{ folder, state: { kind: 'forge-enabled' } }],
+    };
+    let callCount = 0;
+    const resolveDiscoveries: Array<(result: ForgeChangeDiscoveryResult) => void> = [];
+    const discovered: StubChangeDiscovery = {
+      discover: async () => {
+        callCount += 1;
+        return new Promise<ForgeChangeDiscoveryResult>((resolve) => {
+          resolveDiscoveries.push(resolve);
+        });
+      },
+    };
+    const provider = new ForgeExplorerProvider(
+      { getSnapshot: () => snapshot, onDidChangeSnapshot: snapshotEmitter.event },
+      discovered
+    );
+
+    try {
+      const [workspace] = await provider.getChildren();
+      assert.ok(workspace);
+      const pendingChanges = provider.getChildren(workspace);
+
+      snapshot = {
+        kind: 'workspace',
+        folders: [{ folder, state: { kind: 'not-forge' } }],
+      };
+      const disabled = new Promise<void>((resolve) => {
+        provider.onDidChangeTreeData(() => resolve());
+      });
+      snapshotEmitter.fire(snapshot);
+      await disabled;
+
+      resolveDiscoveries[0]?.({
+        kind: 'success',
+        changes: [{ id: 'CHG-OLD', manifestUri: folder.uri }],
+      });
+      const [changes] = await pendingChanges;
+      assert.ok(changes);
+      assert.deepStrictEqual(await provider.getChildren(changes), []);
+
+      snapshot = {
+        kind: 'workspace',
+        folders: [{ folder, state: { kind: 'forge-enabled' } }],
+      };
+      const reenabled = new Promise<void>((resolve) => {
+        provider.onDidChangeTreeData(() => resolve());
+      });
+      snapshotEmitter.fire(snapshot);
+      assert.strictEqual(callCount, 2);
+      resolveDiscoveries[1]?.({
+        kind: 'success',
+        changes: [{ id: 'CHG-NEW', manifestUri: folder.uri }],
+      });
+      await reenabled;
+      assert.strictEqual(callCount, 2);
+
+      const [reenabledWorkspace] = await provider.getChildren();
+      assert.ok(reenabledWorkspace);
+      const [reenabledChanges] = await provider.getChildren(reenabledWorkspace);
+      assert.ok(reenabledChanges);
+      assert.deepStrictEqual(
+        (await provider.getChildren(reenabledChanges)).map((item) => item.label),
+        ['CHG-NEW']
+      );
+    } finally {
+      provider.dispose();
+      snapshotEmitter.dispose();
+    }
+  });
+
   test('caches enabled-folder results and refreshes the projection independently', async () => {
     const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
     let snapshot: ForgeWorkspaceSnapshot = {

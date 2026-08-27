@@ -67,6 +67,7 @@ export class ForgeExplorerProvider
   private readonly discovery: ForgeChangeDiscoverySource;
   private readonly discoveryResults = new Map<string, ForgeChangeDiscoveryResult>();
   private snapshot: ForgeWorkspaceSnapshot;
+  private snapshotGeneration = 0;
 
   readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
@@ -178,8 +179,11 @@ export class ForgeExplorerProvider
       return cached;
     }
 
+    const generation = this.snapshotGeneration;
     const result = await this.discovery.discover(folder);
-    this.discoveryResults.set(key, result);
+    if (generation === this.snapshotGeneration && this.getEnabledFolder(folderUri)) {
+      this.discoveryResults.set(key, result);
+    }
     return result;
   }
 
@@ -194,6 +198,7 @@ export class ForgeExplorerProvider
   }
 
   private async refreshProjection(snapshot: ForgeWorkspaceSnapshot): Promise<void> {
+    this.snapshotGeneration += 1;
     this.snapshot = snapshot;
     const enabledKeys = new Set(
       snapshot.kind === 'workspace'
