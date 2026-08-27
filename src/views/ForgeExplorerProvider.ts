@@ -125,6 +125,9 @@ export class ForgeExplorerProvider
   }
 
   private async getChanges(folderUri: vscode.Uri): Promise<ForgeExplorerItem[]> {
+    if (!this.getEnabledFolder(folderUri)) {
+      return [];
+    }
     await this.discoverFor(folderUri);
     return [
       new ForgeExplorerItem(
@@ -140,6 +143,9 @@ export class ForgeExplorerProvider
   }
 
   private async getChangeItems(folderUri: vscode.Uri): Promise<ForgeExplorerItem[]> {
+    if (!this.getEnabledFolder(folderUri)) {
+      return [];
+    }
     const result = await this.discoverFor(folderUri);
     if (result.kind === 'success') {
       if (result.changes.length === 0) {
@@ -162,21 +168,29 @@ export class ForgeExplorerProvider
 
   private async discoverFor(folderUri: vscode.Uri): Promise<ForgeChangeDiscoveryResult> {
     const key = folderUri.toString();
+    const folder = this.getEnabledFolder(folderUri);
+    if (!folder) {
+      return { kind: 'unavailable', message: 'Change discovery is unavailable.' };
+    }
+
     const cached = this.discoveryResults.get(key);
     if (cached) {
       return cached;
     }
 
-    const folder = this.snapshot.kind === 'workspace'
-      ? this.snapshot.folders.find(({ folder }) => folder.uri.toString() === key)?.folder
-      : undefined;
-    if (!folder) {
-      return { kind: 'unavailable', message: 'Change discovery is unavailable.' };
-    }
-
     const result = await this.discovery.discover(folder);
     this.discoveryResults.set(key, result);
     return result;
+  }
+
+  private getEnabledFolder(folderUri: vscode.Uri): vscode.WorkspaceFolder | undefined {
+    if (this.snapshot.kind !== 'workspace') {
+      return undefined;
+    }
+
+    return this.snapshot.folders.find(
+      ({ folder, state }) => folder.uri.toString() === folderUri.toString() && state.kind === 'forge-enabled'
+    )?.folder;
   }
 
   private async refreshProjection(snapshot: ForgeWorkspaceSnapshot): Promise<void> {
