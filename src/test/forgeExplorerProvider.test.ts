@@ -193,6 +193,148 @@ suite('ForgeExplorerProvider', () => {
     }
   });
 
+  test('replays a pending filesystem event after an enabled snapshot change', async () => {
+    const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+    const folder = workspaceFolder('snapshot-changing');
+    const watcherEvents = new vscode.EventEmitter<vscode.Uri>();
+    const watcherFactory = {
+      createFileSystemWatcher: (): vscode.FileSystemWatcher => ({
+        onDidCreate: watcherEvents.event,
+        onDidChange: watcherEvents.event,
+        onDidDelete: watcherEvents.event,
+        ignoreCreateEvents: false,
+        ignoreChangeEvents: false,
+        ignoreDeleteEvents: false,
+        dispose: () => watcherEvents.dispose(),
+      }),
+    };
+    const pending: Array<(result: ForgeChangeDiscoveryResult) => void> = [];
+    let calls = 0;
+    const discovered: StubChangeDiscovery = {
+      discover: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return { kind: 'success', changes: [{ id: 'CHG-0001', manifestUri: folder.uri }] };
+        }
+        return new Promise<ForgeChangeDiscoveryResult>((resolve) => pending.push(resolve));
+      },
+    };
+    let snapshot: ForgeWorkspaceSnapshot = {
+      kind: 'workspace',
+      folders: [{ folder, state: { kind: 'forge-enabled' } }],
+    };
+    const provider = new ForgeExplorerProvider(
+      {
+        getSnapshot: () => snapshot,
+        onDidChangeSnapshot: snapshotEmitter.event,
+      },
+      discovered,
+      watcherFactory
+    );
+
+    try {
+      const [workspace] = await provider.getChildren();
+      assert.ok(workspace);
+      await provider.getChildren(workspace);
+
+      let targetedRefreshes = 0;
+      provider.onDidChangeTreeData((item) => {
+        if (item?.folderUri?.toString() === folder.uri.toString()) {
+          targetedRefreshes += 1;
+        }
+      });
+      watcherEvents.fire(vscode.Uri.joinPath(folder.uri, 'first-change'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      watcherEvents.fire(vscode.Uri.joinPath(folder.uri, 'second-change'));
+
+      snapshot = {
+        kind: 'workspace',
+        folders: [{ folder, state: { kind: 'forge-enabled' } }],
+      };
+      snapshotEmitter.fire(snapshot);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.strictEqual(calls, 3);
+
+      pending[0]?.({ kind: 'success', changes: [{ id: 'CHG-0002', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.strictEqual(calls, 4);
+
+      pending[1]?.({ kind: 'success', changes: [{ id: 'CHG-0003', manifestUri: folder.uri }] });
+      pending[2]?.({ kind: 'success', changes: [{ id: 'CHG-0004', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(targetedRefreshes, 1);
+      const [changes] = await provider.getChildren(workspace);
+      assert.ok(changes);
+      assert.deepStrictEqual((await provider.getChildren(changes)).map((item) => item.label), [
+        'CHG-0004',
+      ]);
+    } finally {
+      provider.dispose();
+      snapshotEmitter.dispose();
+    }
+  });
+
+  test('does not let an older concurrent discovery overwrite a filesystem result', async () => {
+    const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+    const folder = workspaceFolder('concurrent');
+    const watcherEvents = new vscode.EventEmitter<vscode.Uri>();
+    const watcherFactory = {
+      createFileSystemWatcher: (): vscode.FileSystemWatcher => ({
+        onDidCreate: () => new vscode.Disposable(() => {}),
+        onDidChange: watcherEvents.event,
+        onDidDelete: () => new vscode.Disposable(() => {}),
+        ignoreCreateEvents: false,
+        ignoreChangeEvents: false,
+        ignoreDeleteEvents: false,
+        dispose: () => watcherEvents.dispose(),
+      }),
+    };
+    const pending: Array<(result: ForgeChangeDiscoveryResult) => void> = [];
+    let calls = 0;
+    const discovered: StubChangeDiscovery = {
+      discover: async () => {
+        calls += 1;
+        return new Promise<ForgeChangeDiscoveryResult>((resolve) => pending.push(resolve));
+      },
+    };
+    const provider = new ForgeExplorerProvider(
+      {
+        getSnapshot: () => ({
+          kind: 'workspace',
+          folders: [{ folder, state: { kind: 'forge-enabled' } }],
+        }),
+        onDidChangeSnapshot: snapshotEmitter.event,
+      },
+      discovered,
+      watcherFactory
+    );
+
+    try {
+      const [workspace] = await provider.getChildren();
+      assert.ok(workspace);
+      void provider.getChildren(workspace);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      watcherEvents.fire(vscode.Uri.joinPath(folder.uri, 'changed'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.strictEqual(calls, 2);
+
+      pending[1]?.({ kind: 'success', changes: [{ id: 'CHG-0003', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      pending[0]?.({ kind: 'success', changes: [{ id: 'CHG-0002', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const [changes] = await provider.getChildren(workspace);
+      assert.ok(changes);
+      assert.deepStrictEqual((await provider.getChildren(changes)).map((item) => item.label), [
+        'CHG-0003',
+      ]);
+    } finally {
+      provider.dispose();
+      snapshotEmitter.dispose();
+    }
+  });
+
   test('projects no-workspace as an explicit tree item', async () => {
     const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
     const provider = new ForgeExplorerProvider({

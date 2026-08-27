@@ -71,6 +71,7 @@ export class ForgeExplorerProvider
   private readonly discovery: ForgeChangeDiscoverySource;
   private readonly watcherFactory: ForgeFileSystemWatcherFactory;
   private readonly discoveryResults = new Map<string, ForgeChangeDiscoveryResult>();
+  private readonly discoveryVersions = new Map<string, number>();
   private readonly workspaceItems = new Map<string, ForgeExplorerItem>();
   private readonly watchers = new Map<string, vscode.Disposable>();
   private readonly filesystemRefreshes = new Set<string>();
@@ -196,10 +197,12 @@ export class ForgeExplorerProvider
     }
 
     const generation = this.snapshotGeneration;
+    const version = this.discoveryVersions.get(key) ?? 0;
     const result = await this.discovery.discover(folder);
     if (
       !this.disposed &&
       generation === this.snapshotGeneration &&
+      version === (this.discoveryVersions.get(key) ?? 0) &&
       this.getEnabledFolder(folderUri)
     ) {
       this.discoveryResults.set(key, result);
@@ -316,16 +319,21 @@ export class ForgeExplorerProvider
     this.filesystemRefreshes.add(key);
     try {
       do {
-        this.dirtyFilesystemRefreshes.delete(key);
+        const hadPendingFilesystemRefresh = this.dirtyFilesystemRefreshes.delete(key);
         const generation = this.snapshotGeneration;
+        this.discoveryVersions.set(key, (this.discoveryVersions.get(key) ?? 0) + 1);
         this.discoveryResults.delete(key);
         await this.discoverFor(folderUri);
-        if (
-          this.disposed ||
-          generation !== this.snapshotGeneration ||
-          !this.getEnabledFolder(folderUri)
-        ) {
+        if (this.disposed || !this.getEnabledFolder(folderUri)) {
           break;
+        }
+
+        if (generation !== this.snapshotGeneration) {
+          if (hadPendingFilesystemRefresh || this.dirtyFilesystemRefreshes.has(key)) {
+            this.dirtyFilesystemRefreshes.add(key);
+          } else {
+            break;
+          }
         }
 
         if (!this.dirtyFilesystemRefreshes.has(key)) {
