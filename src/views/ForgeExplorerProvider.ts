@@ -71,8 +71,10 @@ export class ForgeExplorerProvider
   private readonly discovery: ForgeChangeDiscoverySource;
   private readonly watcherFactory: ForgeFileSystemWatcherFactory;
   private readonly discoveryResults = new Map<string, ForgeChangeDiscoveryResult>();
+  private readonly workspaceItems = new Map<string, ForgeExplorerItem>();
   private readonly watchers = new Map<string, vscode.Disposable>();
   private readonly filesystemRefreshes = new Set<string>();
+  private readonly dirtyFilesystemRefreshes = new Set<string>();
   private snapshot: ForgeWorkspaceSnapshot;
   private snapshotGeneration = 0;
   private disposed = false;
@@ -117,15 +119,7 @@ export class ForgeExplorerProvider
     return this.snapshot.folders.map(({ folder, state }) => {
       switch (state.kind) {
         case 'forge-enabled':
-          return new ForgeExplorerItem(
-            folder.name,
-            'forge-enabled',
-            'Forge enabled',
-            'pass',
-            'workspace',
-            folder.uri,
-            vscode.TreeItemCollapsibleState.Collapsed
-          );
+          return this.getWorkspaceItem(folder.uri)!;
         case 'not-forge':
           return new ForgeExplorerItem(folder.name, 'not-forge', 'Not Forge', 'circle-slash');
         case 'unknown':
@@ -242,6 +236,11 @@ export class ForgeExplorerProvider
         this.discoveryResults.delete(key);
       }
     }
+    for (const key of this.workspaceItems.keys()) {
+      if (!enabledKeys.has(key)) {
+        this.workspaceItems.delete(key);
+      }
+    }
 
     if (snapshot.kind === 'workspace') {
       await Promise.all(
@@ -311,22 +310,59 @@ export class ForgeExplorerProvider
 
     const key = folderUri.toString();
     if (this.filesystemRefreshes.has(key)) {
+      this.dirtyFilesystemRefreshes.add(key);
       return;
     }
     this.filesystemRefreshes.add(key);
-    const generation = this.snapshotGeneration;
     try {
-      this.discoveryResults.delete(key);
-      await this.discoverFor(folderUri);
-      if (
-        !this.disposed &&
-        generation === this.snapshotGeneration &&
-        this.getEnabledFolder(folderUri)
-      ) {
-        this.onDidChangeTreeDataEmitter.fire(undefined);
-      }
+      do {
+        this.dirtyFilesystemRefreshes.delete(key);
+        const generation = this.snapshotGeneration;
+        this.discoveryResults.delete(key);
+        await this.discoverFor(folderUri);
+        if (
+          this.disposed ||
+          generation !== this.snapshotGeneration ||
+          !this.getEnabledFolder(folderUri)
+        ) {
+          break;
+        }
+
+        if (!this.dirtyFilesystemRefreshes.has(key)) {
+          const workspaceItem = this.getWorkspaceItem(folderUri);
+          if (workspaceItem) {
+            this.onDidChangeTreeDataEmitter.fire(workspaceItem);
+          }
+        }
+      } while (this.dirtyFilesystemRefreshes.has(key));
     } finally {
       this.filesystemRefreshes.delete(key);
+      this.dirtyFilesystemRefreshes.delete(key);
     }
+  }
+
+  private getWorkspaceItem(folderUri: vscode.Uri): ForgeExplorerItem | undefined {
+    const folder = this.getEnabledFolder(folderUri);
+    if (!folder) {
+      return undefined;
+    }
+
+    const key = folderUri.toString();
+    const cached = this.workspaceItems.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    const item = new ForgeExplorerItem(
+      folder.name,
+      'forge-enabled',
+      'Forge enabled',
+      'pass',
+      'workspace',
+      folder.uri,
+      vscode.TreeItemCollapsibleState.Collapsed
+    );
+    this.workspaceItems.set(key, item);
+    return item;
   }
 }

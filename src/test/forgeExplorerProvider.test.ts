@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
   ForgeExplorerProvider,
   ForgeExplorerItem,
+  ForgeFileSystemWatcherFactory,
   ForgeWorkspaceSnapshotSource,
 } from '../views/ForgeExplorerProvider';
 import {
@@ -72,6 +73,8 @@ suite('ForgeExplorerProvider', () => {
 
     try {
       const workspaces = await provider.getChildren();
+      const firstWorkspace = workspaces[0];
+      assert.ok(firstWorkspace);
       const changes = await Promise.all(workspaces.map((workspace) => provider.getChildren(workspace)));
       const changeSections = changes.map(([item]) => item);
       assert.ok(changeSections[0]);
@@ -84,9 +87,11 @@ suite('ForgeExplorerProvider', () => {
       ]);
 
       let refreshCount = 0;
+      let refreshedItem: ForgeExplorerItem | undefined;
       const refreshed = new Promise<void>((resolve) => {
-        provider.onDidChangeTreeData(() => {
+        provider.onDidChangeTreeData((item) => {
           refreshCount += 1;
+          refreshedItem = item;
           resolve();
         });
       });
@@ -99,12 +104,89 @@ suite('ForgeExplorerProvider', () => {
       ]);
 
       assert.strictEqual(refreshCount, 1);
+  assert.strictEqual(refreshedItem?.folderUri?.toString(), folders[0]!.uri.toString());
+      assert.strictEqual(refreshedItem, firstWorkspace);
       assert.deepStrictEqual((await provider.getChildren(changeSections[0])).map((item) => item.label), [
         'CHG-0002',
       ]);
       assert.deepStrictEqual((await provider.getChildren(changeSections[1])).map((item) => item.label), [
         'CHG-0001',
       ]);
+    } finally {
+      provider.dispose();
+      snapshotEmitter.dispose();
+    }
+  });
+
+  test('replays a filesystem refresh that arrives during discovery', async () => {
+    const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+    const folder = workspaceFolder('changing');
+    const watcherEvents = new vscode.EventEmitter<vscode.Uri>();
+    const watcherFactory = {
+      createFileSystemWatcher: (): vscode.FileSystemWatcher => ({
+        onDidCreate: watcherEvents.event,
+        onDidChange: watcherEvents.event,
+        onDidDelete: watcherEvents.event,
+        ignoreCreateEvents: false,
+        ignoreChangeEvents: false,
+        ignoreDeleteEvents: false,
+        dispose: () => watcherEvents.dispose(),
+      }),
+    };
+    const pending: Array<(result: ForgeChangeDiscoveryResult) => void> = [];
+    let calls = 0;
+    const discovered: StubChangeDiscovery = {
+      discover: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return { kind: 'success', changes: [{ id: 'CHG-0001', manifestUri: folder.uri }] };
+        }
+        return new Promise<ForgeChangeDiscoveryResult>((resolve) => pending.push(resolve));
+      },
+    };
+    const provider = new (ForgeExplorerProvider as unknown as new (
+      source: ForgeWorkspaceSnapshotSource,
+      discovery: StubChangeDiscovery,
+      watcherFactory: ForgeFileSystemWatcherFactory
+    ) => ForgeExplorerProvider)(
+      {
+        getSnapshot: () => ({
+          kind: 'workspace',
+          folders: [{ folder, state: { kind: 'forge-enabled' as const } }],
+        }),
+        onDidChangeSnapshot: snapshotEmitter.event,
+      },
+      discovered,
+      watcherFactory
+    );
+
+    try {
+      const [workspace] = await provider.getChildren();
+      assert.ok(workspace);
+      await provider.getChildren(workspace);
+
+      let refreshCount = 0;
+      provider.onDidChangeTreeData(() => {
+        refreshCount += 1;
+      });
+      watcherEvents.fire(vscode.Uri.joinPath(folder.uri, 'first-change'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      watcherEvents.fire(vscode.Uri.joinPath(folder.uri, 'second-change'));
+      assert.strictEqual(calls, 2);
+
+      pending[0]?.({ kind: 'success', changes: [{ id: 'CHG-0002', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.strictEqual(calls, 3);
+      pending[1]?.({ kind: 'success', changes: [{ id: 'CHG-0003', manifestUri: folder.uri }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(refreshCount, 1);
+      const [changes] = await provider.getChildren(workspace);
+      assert.ok(changes);
+      assert.deepStrictEqual(
+        (await provider.getChildren(changes)).map((item) => item.label),
+        ['CHG-0003']
+      );
     } finally {
       provider.dispose();
       snapshotEmitter.dispose();
