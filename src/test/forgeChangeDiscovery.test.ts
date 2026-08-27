@@ -9,7 +9,8 @@ class StubFileSystem implements ForgeChangeDiscoveryFileSystem {
   constructor(
     private readonly entries: readonly [string, vscode.FileType][],
     private readonly manifests: ReadonlyMap<string, string>,
-    private readonly statError?: Error
+    private readonly statError?: Error,
+    private readonly readDirectoryError?: Error
   ) {}
 
   async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
@@ -22,6 +23,10 @@ class StubFileSystem implements ForgeChangeDiscoveryFileSystem {
   }
 
   async readDirectory(): Promise<readonly [string, vscode.FileType][]> {
+    if (this.readDirectoryError) {
+      throw this.readDirectoryError;
+    }
+
     return this.entries;
   }
 
@@ -124,9 +129,32 @@ suite('ForgeChangeDiscovery', () => {
     }
   });
 
-  test('returns unavailable when the Changes directory cannot be read', async () => {
+  test('returns unavailable when the Changes directory enumeration fails', async () => {
     const discovery = new ForgeChangeDiscovery(
-      new StubFileSystem([], new Map(), vscode.FileSystemError.NoPermissions(vscode.Uri.file('/workspace/.forge/changes')))
+      new StubFileSystem(
+        [],
+        new Map(),
+        undefined,
+        vscode.FileSystemError.NoPermissions(vscode.Uri.file('/workspace/.forge/changes'))
+      )
+    );
+
+    const result = await discovery.discover(workspaceFolder());
+
+    assert.deepStrictEqual(result, {
+      kind: 'unavailable',
+      message: 'Change discovery is unavailable.',
+    });
+  });
+
+  test('returns unavailable when enumeration reports FileNotFound after stat confirms the directory', async () => {
+    const discovery = new ForgeChangeDiscovery(
+      new StubFileSystem(
+        [],
+        new Map(),
+        undefined,
+        vscode.FileSystemError.FileNotFound(vscode.Uri.file('/workspace/.forge/changes'))
+      )
     );
 
     const result = await discovery.discover(workspaceFolder());

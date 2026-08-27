@@ -14,7 +14,8 @@ export interface ForgeChange {
 
 export type ForgeChangeDiscoveryResult =
   | { readonly kind: 'success'; readonly changes: readonly ForgeChange[] }
-  | { readonly kind: 'unavailable' | 'invalid'; readonly message: string };
+  | { readonly kind: 'unavailable'; readonly message: string }
+  | { readonly kind: 'invalid'; readonly message: string };
 
 const INVALID_MESSAGE = 'Change manifest is invalid.';
 const UNAVAILABLE_MESSAGE = 'Change discovery is unavailable.';
@@ -53,47 +54,55 @@ export class ForgeChangeDiscovery {
 
   async discover(folder: vscode.WorkspaceFolder): Promise<ForgeChangeDiscoveryResult> {
     const changesUri = vscode.Uri.joinPath(folder.uri, '.forge', 'changes');
+    let changesStat: vscode.FileStat;
     try {
-      const changesStat = await this.fileSystem.stat(changesUri);
-      if ((changesStat.type & vscode.FileType.Directory) === 0) {
-        return { kind: 'unavailable', message: UNAVAILABLE_MESSAGE };
-      }
-
-      const entries = await this.fileSystem.readDirectory(changesUri);
-      const changes: ForgeChange[] = [];
-      for (const [directoryName, type] of entries) {
-        if ((type & vscode.FileType.Directory) === 0) {
-          continue;
-        }
-
-        const manifestUri = vscode.Uri.joinPath(changesUri, directoryName, 'manifest.yml');
-        let contents: Uint8Array;
-        try {
-          contents = await this.fileSystem.readFile(manifestUri);
-        } catch {
-          return { kind: 'unavailable', message: UNAVAILABLE_MESSAGE };
-        }
-
-        let manifest: unknown;
-        try {
-          manifest = YAML.parse(new TextDecoder().decode(contents));
-        } catch {
-          return { kind: 'invalid', message: INVALID_MESSAGE };
-        }
-
-        if (!isValidManifest(manifest)) {
-          return { kind: 'invalid', message: INVALID_MESSAGE };
-        }
-
-        changes.push({ id: manifest.change.id, manifestUri });
-      }
-
-      return { kind: 'success', changes };
+      changesStat = await this.fileSystem.stat(changesUri);
     } catch (error) {
       if (isFileSystemError(error, 'FileNotFound')) {
         return { kind: 'success', changes: [] };
       }
       return { kind: 'unavailable', message: UNAVAILABLE_MESSAGE };
     }
+
+    if ((changesStat.type & vscode.FileType.Directory) === 0) {
+      return { kind: 'unavailable', message: UNAVAILABLE_MESSAGE };
+    }
+
+    let entries: readonly [string, vscode.FileType][];
+    try {
+      entries = await this.fileSystem.readDirectory(changesUri);
+    } catch {
+      return { kind: 'unavailable', message: UNAVAILABLE_MESSAGE };
+    }
+
+    const changes: ForgeChange[] = [];
+    for (const [directoryName, type] of entries) {
+      if ((type & vscode.FileType.Directory) === 0) {
+        continue;
+      }
+
+      const manifestUri = vscode.Uri.joinPath(changesUri, directoryName, 'manifest.yml');
+      let contents: Uint8Array;
+      try {
+        contents = await this.fileSystem.readFile(manifestUri);
+      } catch {
+        return { kind: 'unavailable', message: UNAVAILABLE_MESSAGE };
+      }
+
+      let manifest: unknown;
+      try {
+        manifest = YAML.parse(new TextDecoder().decode(contents));
+      } catch {
+        return { kind: 'invalid', message: INVALID_MESSAGE };
+      }
+
+      if (!isValidManifest(manifest)) {
+        return { kind: 'invalid', message: INVALID_MESSAGE };
+      }
+
+      changes.push({ id: manifest.change.id, manifestUri });
+    }
+
+    return { kind: 'success', changes };
   }
 }
