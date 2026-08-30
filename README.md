@@ -248,6 +248,85 @@ Diagnostics
 └── Repository valid
 ```
 
+## Review Experience
+
+The extension exposes Review as three UX-level modes instead of internal
+Protocol concepts such as `strict`, `standard`, or a specific Flow:
+
+* **Recommended** — default; Forge determines the rigor appropriate to the
+  Change.
+* **Fast** — prioritizes speed and the findings that matter most.
+* **Thorough** — deeper, adversarial analysis for Changes that need
+  stronger assurance.
+
+Forge continues to resolve whatever internal profile actually governs the
+Change (per Flow, the Engineering Contract, and other applicable rules).
+That resolved profile is called the **effective profile**, and it is always
+shown next to the selected mode — so a mode choice can never silently
+absorb a reduction in assurance that Flow or the Contract requires.
+
+For each Change, the Forge Explorer projects:
+
+```text
+CHG-0023 · Customer Credit Limits
+├── Mode: Fast · Effective: strict (Required by Engineering Contract)
+├── Stage: Resolution — Resolving 1 open finding
+├── Findings (1/2 resolved)
+│   ├── ✓ F-001 — Unused import
+│   └── ● F-002 · blocking — Missing authorization check
+└── Next: Targeted re-review of resolved findings
+```
+
+Progress is distinguished explicitly across **Discovery**, **Findings**,
+**Resolution**, and **Re-review**, so it is always possible to tell what
+Forge is doing now and what remains. After Resolution, Forge is expected to
+run re-review targeted at resolved findings and the produced delta rather
+than restarting a full Discovery. Once a Change's Review concludes, the
+final state is projected explicitly (`Result: Clear`, `Result: Stopped with
+open findings`, `Result: Stopped`) together with the count of open findings
+— a stopped Review with unresolved findings is never presented as a pass.
+
+### Repository-native Review state
+
+Like Change discovery, Review observability is read directly from the
+repository. This extension's current working assumption about that public
+contract — in the same spirit as `ForgeWorkspaceDetector`'s reliance on
+`.forge/forge.yml` — is a `forge/review@1` document at:
+
+```text
+.forge/changes/<id>/review/state.yml
+```
+
+containing the Change's mode, effective profile (and, optionally, why it
+differs from the mode), current stage, a findings list (each with a status,
+a blocking flag, and optional evidence path), and, once concluded, a result
+that is explicit about whether it may be presented as a success. Missing,
+unavailable, and invalid Review state are all shown explicitly rather than
+folded into a generic empty state. If forge-protocol's public schema for
+this differs, `ForgeReviewReader` should be updated to match it.
+
+### Setting a Review mode
+
+Selecting a mode or stopping a Review are normative operations — they
+change what Forge does next — so, like other normative operations, they are
+delegated to the Forge CLI rather than performed by the extension:
+
+```bash
+forge review set-mode CHG-XXXX <recommended|fast|thorough>
+forge review stop CHG-XXXX
+```
+
+Right-click a Change in the Forge Explorer to reach **Forge: Set Review
+Mode…** and **Forge: Stop Review**. `forge.review.defaultMode` (workspace
+setting, default `recommended`) is the extension-owned, persistent
+preference pre-selected the next time a mode is picked — it never changes
+Forge's actual behavior on its own and never reduces required assurance.
+
+Stopping a Review always confirms first, and states plainly whether any
+findings remain unresolved and whether the outcome can be presented as a
+pass — the developer keeps control over time and computation without being
+able to fabricate a false success.
+
 ## Commands
 
 The initial command surface is intentionally small.
@@ -261,6 +340,9 @@ Forge: Open Review
 Forge: Validate Repository
 Forge: Show Diagnostics
 Forge: Refresh
+Forge: Set Review Mode…
+Forge: Set Default Review Mode…
+Forge: Stop Review
 ```
 
 Commands that execute or govern the Forge lifecycle should only be introduced when their authority and integration boundary are explicit.

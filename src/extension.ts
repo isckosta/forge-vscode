@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 import { registerShowVersionCommand } from './commands/showVersion';
+import { registerReviewCommands } from './commands/reviewCommands';
 import { ForgeWorkspaceDetector } from './forge/workspace/ForgeWorkspaceDetector';
 import { ForgeExplorerProvider } from './views/ForgeExplorerProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   registerShowVersionCommand(context);
+  registerReviewCommands(context);
 
   const forgeWorkspaceDetector = new ForgeWorkspaceDetector();
   const forgeExplorerProvider = new ForgeExplorerProvider(forgeWorkspaceDetector);

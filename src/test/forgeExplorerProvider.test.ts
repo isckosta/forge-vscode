@@ -10,9 +10,14 @@ import {
   ForgeWorkspaceSnapshot,
 } from '../forge/workspace/ForgeWorkspaceDetector';
 import { ForgeChangeDiscoveryResult } from '../forge/changes/ForgeChangeDiscovery';
+import { ForgeReviewResult } from '../forge/review/ForgeReviewReader';
 
 interface StubChangeDiscovery {
   discover(folder: vscode.WorkspaceFolder): Promise<ForgeChangeDiscoveryResult>;
+}
+
+interface StubReviewReader {
+  discover(folder: vscode.WorkspaceFolder, changeId: string): Promise<ForgeReviewResult>;
 }
 
 function workspaceFolder(name: string, index = 0): vscode.WorkspaceFolder {
@@ -1027,5 +1032,129 @@ suite('ForgeExplorerProvider', () => {
       provider.dispose();
       snapshotEmitter.dispose();
     }
+  });
+
+  suite('Review projection', () => {
+    async function changeItemFor(
+      review: ForgeReviewResult
+    ): Promise<{ provider: ForgeExplorerProvider; item: ForgeExplorerItem; dispose: () => void }> {
+      const snapshotEmitter = new vscode.EventEmitter<ForgeWorkspaceSnapshot>();
+      const snapshot: ForgeWorkspaceSnapshot = {
+        kind: 'workspace',
+        folders: [{ folder: workspaceFolder('enabled'), state: { kind: 'forge-enabled' } }],
+      };
+      const discovered: StubChangeDiscovery = {
+        discover: async () => ({
+          kind: 'success',
+          changes: [{ id: 'CHG-0001', manifestUri: vscode.Uri.file('/enabled/manifest.yml') }],
+        }),
+      };
+      const reviewReader: StubReviewReader = { discover: async () => review };
+      const provider = new ForgeExplorerProvider(
+        { getSnapshot: () => snapshot, onDidChangeSnapshot: snapshotEmitter.event },
+        discovered,
+        vscode.workspace,
+        reviewReader
+      );
+      const [workspace] = await provider.getChildren();
+      assert.ok(workspace);
+      const [changesNode] = await provider.getChildren(workspace);
+      assert.ok(changesNode);
+      const [item] = await provider.getChildren(changesNode);
+      assert.ok(item);
+      return { provider, item, dispose: () => { provider.dispose(); snapshotEmitter.dispose(); } };
+    }
+
+    test('shows mode, effective profile, stage, findings, and next step', async () => {
+      const review: ForgeReviewResult = {
+        kind: 'success',
+        review: {
+          mode: 'fast',
+          effectiveProfile: 'strict',
+          effectiveProfileReason: 'Required by Engineering Contract',
+          stage: 'resolution',
+          summary: 'Resolving 1 open finding',
+          remaining: 'Targeted re-review of resolved findings',
+          findings: [
+            { id: 'F-001', status: 'resolved', blocking: false, summary: 'Unused import' },
+            { id: 'F-002', status: 'open', blocking: true, summary: 'Missing authorization check' },
+          ],
+        },
+      };
+      const { item, provider, dispose } = await changeItemFor(review);
+
+      try {
+        const children = await provider.getChildren(item);
+        assert.deepStrictEqual(
+          children.map((child) => [child.label, child.contextValue]),
+          [
+            ['Mode: Fast', 'review-mode'],
+            ['Stage: Resolution', 'review-stage'],
+            ['Findings (1/2 resolved)', 'review-findings'],
+            ['Next: Targeted re-review of resolved findings', 'review-next'],
+          ]
+        );
+        assert.strictEqual(children[0]?.description, 'Effective: strict (Required by Engineering Contract)');
+
+        const findingsNode = children.find((child) => child.contextValue === 'review-findings');
+        assert.ok(findingsNode);
+        const findings = await provider.getChildren(findingsNode);
+        assert.deepStrictEqual(
+          findings.map((finding) => [finding.label, finding.contextValue]),
+          [
+            ['F-001', 'finding-resolved'],
+            ['F-002', 'finding-open'],
+          ]
+        );
+        assert.strictEqual(findings[1]?.description, 'blocking · Missing authorization check');
+      } finally {
+        dispose();
+      }
+    });
+
+    test('shows a concluded result that cannot be mistaken for a pass', async () => {
+      const review: ForgeReviewResult = {
+        kind: 'success',
+        review: {
+          mode: 'recommended',
+          effectiveProfile: 'standard',
+          stage: 'concluded',
+          findings: [{ id: 'F-001', status: 'open', blocking: true, summary: 'Missing authorization check' }],
+          concluded: { result: 'stopped-with-open-findings', openFindingsCount: 1, canClaimSuccess: false },
+        },
+      };
+      const { item, provider, dispose } = await changeItemFor(review);
+
+      try {
+        const children = await provider.getChildren(item);
+        const result = children.find((child) => child.contextValue === 'review-result');
+        assert.ok(result);
+        assert.strictEqual(result.label, 'Result: Stopped with open findings');
+        assert.strictEqual(result.description, '1 open finding · not a pass');
+        assert.strictEqual(children.some((child) => child.contextValue === 'review-next'), false);
+      } finally {
+        dispose();
+      }
+    });
+
+    test('projects not-started, unavailable, and invalid review states explicitly', async () => {
+      const cases: Array<[ForgeReviewResult, string, string]> = [
+        [{ kind: 'not-started' }, 'Review not started', 'review-not-started'],
+        [{ kind: 'unavailable', message: 'Review state is unavailable.' }, 'Review unavailable', 'review-unavailable'],
+        [{ kind: 'invalid', message: 'Review state is invalid.' }, 'Review invalid', 'review-invalid'],
+      ];
+
+      for (const [review, label, contextValue] of cases) {
+        const { item, provider, dispose } = await changeItemFor(review);
+        try {
+          const children = await provider.getChildren(item);
+          assert.deepStrictEqual(children.map((child) => [child.label, child.contextValue]), [
+            [label, contextValue],
+          ]);
+        } finally {
+          dispose();
+        }
+      }
+    });
   });
 });

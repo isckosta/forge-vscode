@@ -22,8 +22,34 @@
       {
         "command": "forge.showVersion",
         "title": "Forge: Show Version"
+      },
+      {
+        "command": "forge.review.setMode",
+        "title": "Forge: Set Review Mode…"
+      },
+      {
+        "command": "forge.review.setDefaultMode",
+        "title": "Forge: Set Default Review Mode…"
+      },
+      {
+        "command": "forge.review.stop",
+        "title": "Forge: Stop Review"
       }
     ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "forge.review.setMode",
+          "when": "view == forge.explorer && viewItem == change",
+          "group": "forge-review@1"
+        },
+        {
+          "command": "forge.review.stop",
+          "when": "view == forge.explorer && viewItem == change",
+          "group": "forge-review@2"
+        }
+      ]
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -40,6 +66,23 @@
           "name": "Explorer"
         }
       ]
+    },
+    "configuration": {
+      "title": "Forge",
+      "properties": {
+        "forge.review.defaultMode": {
+          "type": "string",
+          "enum": ["recommended", "fast", "thorough"],
+          "enumDescriptions": [
+            "Forge determines the rigor appropriate to the Change.",
+            "Prioritizes speed and the findings that matter most.",
+            "Deeper, adversarial analysis for changes that need stronger assurance."
+          ],
+          "default": "recommended",
+          "scope": "resource",
+          "description": "Default Review mode suggested when setting a Change's Review mode. This is an extension-side preference only — it never silently reduces assurance required by Flow or the Engineering Contract."
+        }
+      }
     }
   },
   "scripts": {

@@ -7,6 +7,14 @@ import {
   ForgeChangeDiscovery,
   ForgeChangeDiscoveryResult,
 } from '../forge/changes/ForgeChangeDiscovery';
+import {
+  ForgeReview,
+  ForgeReviewFinding,
+  ForgeReviewMode,
+  ForgeReviewReader,
+  ForgeReviewResult,
+  ForgeReviewStage,
+} from '../forge/review/ForgeReviewReader';
 
 export interface ForgeWorkspaceSnapshotSource {
   readonly onDidChangeSnapshot: vscode.Event<ForgeWorkspaceSnapshot>;
@@ -17,33 +25,51 @@ export interface ForgeChangeDiscoverySource {
   discover(folder: vscode.WorkspaceFolder): Promise<ForgeChangeDiscoveryResult>;
 }
 
+export interface ForgeReviewSource {
+  discover(folder: vscode.WorkspaceFolder, changeId: string): Promise<ForgeReviewResult>;
+}
+
 export interface ForgeFileSystemWatcherFactory {
   createFileSystemWatcher(pattern: vscode.GlobPattern): vscode.FileSystemWatcher;
 }
 
-type ForgeExplorerItemKind = 'workspace' | 'changes' | 'change' | 'state' | 'status';
+type ForgeExplorerItemKind = 'workspace' | 'changes' | 'change' | 'review-findings' | 'state' | 'status';
+
+export type ForgeExplorerItemContextValue =
+  | 'forge-enabled'
+  | 'not-forge'
+  | 'unknown'
+  | 'no-workspace'
+  | 'changes'
+  | 'change'
+  | 'changes-empty'
+  | 'changes-unavailable'
+  | 'changes-invalid'
+  | 'review-mode'
+  | 'review-stage'
+  | 'review-findings'
+  | 'review-next'
+  | 'review-result'
+  | 'review-not-started'
+  | 'review-unavailable'
+  | 'review-invalid'
+  | 'finding-open'
+  | 'finding-resolved';
 
 export class ForgeExplorerItem extends vscode.TreeItem {
   readonly kind: ForgeExplorerItemKind;
   readonly folderUri?: vscode.Uri;
+  readonly changeId?: string;
 
   constructor(
     label: string,
-    contextValue:
-      | 'forge-enabled'
-      | 'not-forge'
-      | 'unknown'
-      | 'no-workspace'
-      | 'changes'
-      | 'change'
-      | 'changes-empty'
-      | 'changes-unavailable'
-      | 'changes-invalid',
+    contextValue: ForgeExplorerItemContextValue,
     description?: string,
     iconId?: string,
     kind: ForgeExplorerItemKind = 'status',
     folderUri?: vscode.Uri,
-    collapsibleState: vscode.TreeItemCollapsibleState = vscode.TreeItemCollapsibleState.None
+    collapsibleState: vscode.TreeItemCollapsibleState = vscode.TreeItemCollapsibleState.None,
+    changeId?: string
   ) {
     super(label, collapsibleState);
     this.contextValue = contextValue;
@@ -51,7 +77,100 @@ export class ForgeExplorerItem extends vscode.TreeItem {
     this.iconPath = iconId ? new vscode.ThemeIcon(iconId) : undefined;
     this.kind = kind;
     this.folderUri = folderUri;
+    this.changeId = changeId;
   }
+}
+
+const REVIEW_MODE_LABELS: Readonly<Record<ForgeReviewMode, string>> = {
+  recommended: 'Recommended',
+  fast: 'Fast',
+  thorough: 'Thorough',
+};
+
+const REVIEW_STAGE_LABELS: Readonly<Record<ForgeReviewStage, string>> = {
+  discovery: 'Discovery',
+  findings: 'Findings',
+  resolution: 'Resolution',
+  're-review': 'Re-review',
+  concluded: 'Concluded',
+};
+
+function buildFindingItem(finding: ForgeReviewFinding): ForgeExplorerItem {
+  const icon = finding.status === 'resolved' ? 'pass' : finding.blocking ? 'error' : 'warning';
+  const descriptionParts = [finding.blocking && finding.status === 'open' ? 'blocking' : undefined, finding.summary].filter(
+    (part): part is string => Boolean(part)
+  );
+  const item = new ForgeExplorerItem(
+    finding.id,
+    finding.status === 'resolved' ? 'finding-resolved' : 'finding-open',
+    descriptionParts.join(' · '),
+    icon
+  );
+  if (finding.evidenceUri) {
+    item.command = {
+      command: 'vscode.open',
+      title: 'Open Evidence',
+      arguments: [finding.evidenceUri],
+    };
+  }
+  return item;
+}
+
+function buildReviewItems(review: ForgeReview, folderUri: vscode.Uri, changeId: string): ForgeExplorerItem[] {
+  const items: ForgeExplorerItem[] = [];
+
+  const effectiveDescription = review.effectiveProfileReason
+    ? `Effective: ${review.effectiveProfile} (${review.effectiveProfileReason})`
+    : `Effective: ${review.effectiveProfile}`;
+  items.push(
+    new ForgeExplorerItem(`Mode: ${REVIEW_MODE_LABELS[review.mode]}`, 'review-mode', effectiveDescription, 'settings-gear')
+  );
+
+  items.push(
+    new ForgeExplorerItem(`Stage: ${REVIEW_STAGE_LABELS[review.stage]}`, 'review-stage', review.summary, 'sync')
+  );
+
+  if (review.findings.length > 0) {
+    const resolved = review.findings.filter((finding) => finding.status === 'resolved').length;
+    items.push(
+      new ForgeExplorerItem(
+        `Findings (${resolved}/${review.findings.length} resolved)`,
+        'review-findings',
+        undefined,
+        'list-unordered',
+        'review-findings',
+        folderUri,
+        vscode.TreeItemCollapsibleState.Collapsed,
+        changeId
+      )
+    );
+  }
+
+  if (review.stage !== 'concluded' && review.remaining) {
+    items.push(new ForgeExplorerItem(`Next: ${review.remaining}`, 'review-next', undefined, 'arrow-right'));
+  }
+
+  if (review.concluded) {
+    const { concluded } = review;
+    const resultLabels: Record<typeof concluded.result, string> = {
+      clear: 'Result: Clear',
+      'stopped-with-open-findings': 'Result: Stopped with open findings',
+      stopped: 'Result: Stopped',
+    };
+    const description = `${concluded.openFindingsCount} open finding${concluded.openFindingsCount === 1 ? '' : 's'}${
+      concluded.canClaimSuccess ? '' : ' · not a pass'
+    }`;
+    items.push(
+      new ForgeExplorerItem(
+        resultLabels[concluded.result],
+        'review-result',
+        description,
+        concluded.result === 'clear' ? 'pass' : 'warning'
+      )
+    );
+  }
+
+  return items;
 }
 
 const UNKNOWN_REASON_LABELS: Readonly<Record<ForgeDetectionFailureReason, string>> = {
@@ -69,6 +188,7 @@ export class ForgeExplorerProvider
   >();
   private readonly snapshotSubscription: vscode.Disposable;
   private readonly discovery: ForgeChangeDiscoverySource;
+  private readonly reviewReader: ForgeReviewSource;
   private readonly watcherFactory: ForgeFileSystemWatcherFactory;
   private readonly discoveryResults = new Map<string, ForgeChangeDiscoveryResult>();
   private readonly discoveryVersions = new Map<string, number>();
@@ -85,10 +205,12 @@ export class ForgeExplorerProvider
   constructor(
     source: ForgeWorkspaceSnapshotSource,
     discovery: ForgeChangeDiscoverySource = new ForgeChangeDiscovery(),
-    watcherFactory: ForgeFileSystemWatcherFactory = vscode.workspace
+    watcherFactory: ForgeFileSystemWatcherFactory = vscode.workspace,
+    reviewReader: ForgeReviewSource = new ForgeReviewReader()
   ) {
     this.discovery = discovery;
     this.watcherFactory = watcherFactory;
+    this.reviewReader = reviewReader;
     this.snapshot = source.getSnapshot();
     this.reconcileWatchers(this.snapshot);
     this.snapshotSubscription = source.onDidChangeSnapshot((snapshot) => {
@@ -107,6 +229,12 @@ export class ForgeExplorerProvider
       }
       if (element.kind === 'changes' && element.folderUri) {
         return this.getChangeItems(element.folderUri);
+      }
+      if (element.kind === 'change' && element.folderUri && element.changeId) {
+        return this.getReviewItems(element.folderUri, element.changeId);
+      }
+      if (element.kind === 'review-findings' && element.folderUri && element.changeId) {
+        return this.getFindingItems(element.folderUri, element.changeId);
       }
       return [];
     }
@@ -170,7 +298,17 @@ export class ForgeExplorerProvider
         return [new ForgeExplorerItem('No Changes found', 'changes-empty', undefined, 'info')];
       }
       return result.changes.map(
-        (change) => new ForgeExplorerItem(change.id, 'change', undefined, 'file', 'change')
+        (change) =>
+          new ForgeExplorerItem(
+            change.id,
+            'change',
+            undefined,
+            'file',
+            'change',
+            folderUri,
+            vscode.TreeItemCollapsibleState.Collapsed,
+            change.id
+          )
       );
     }
 
@@ -182,6 +320,56 @@ export class ForgeExplorerProvider
         'warning'
       ),
     ];
+  }
+
+  private async getReviewItems(folderUri: vscode.Uri, changeId: string): Promise<ForgeExplorerItem[]> {
+    const folder = this.getEnabledFolder(folderUri);
+    if (!folder) {
+      return [];
+    }
+    const generation = this.snapshotGeneration;
+    const result = await this.reviewReader.discover(folder, changeId);
+    if (generation !== this.snapshotGeneration || !this.getEnabledFolder(folderUri)) {
+      return [];
+    }
+
+    switch (result.kind) {
+      case 'success':
+        return buildReviewItems(result.review, folderUri, changeId);
+      case 'not-started':
+        return [
+          new ForgeExplorerItem(
+            'Review not started',
+            'review-not-started',
+            'Recommended mode runs by default',
+            'circle-outline'
+          ),
+        ];
+      case 'unavailable':
+      case 'invalid':
+        return [
+          new ForgeExplorerItem(
+            result.kind === 'invalid' ? 'Review invalid' : 'Review unavailable',
+            result.kind === 'invalid' ? 'review-invalid' : 'review-unavailable',
+            result.message,
+            'warning'
+          ),
+        ];
+    }
+  }
+
+  private async getFindingItems(folderUri: vscode.Uri, changeId: string): Promise<ForgeExplorerItem[]> {
+    const folder = this.getEnabledFolder(folderUri);
+    if (!folder) {
+      return [];
+    }
+    const generation = this.snapshotGeneration;
+    const result = await this.reviewReader.discover(folder, changeId);
+    if (generation !== this.snapshotGeneration || !this.getEnabledFolder(folderUri) || result.kind !== 'success') {
+      return [];
+    }
+
+    return result.review.findings.map((finding) => buildFindingItem(finding));
   }
 
   private async discoverFor(folderUri: vscode.Uri): Promise<ForgeChangeDiscoveryResult> {
